@@ -15,7 +15,7 @@ on:
       DEVICE_TREE:
         description: 'Custom Recovery Tree'
         required: true
-        default: 'YOUR_LAKE_DEVICE_TREE_URL'
+        default: ''
 
       DEVICE_TREE_BRANCH:
         description: 'Custom Recovery Tree Branch'
@@ -51,7 +51,6 @@ jobs:
   build:
     name: Build TWRP by ${{ github.actor }}
     runs-on: ubuntu-22.04
-
     if: github.event.repository.owner.id == github.event.sender.id
 
     env:
@@ -62,49 +61,26 @@ jobs:
 
     steps:
 
-      # ---------------------------------------------------------
-      # CHECKOUT
-      # ---------------------------------------------------------
-
       - name: Check Out
         uses: actions/checkout@v4
 
-      # ---------------------------------------------------------
-      # DISPLAY INPUTS
-      # ---------------------------------------------------------
-
       - name: Display Inputs
         run: |
-          echo "========================================"
-          echo "TWRP BUILD CONFIGURATION"
-          echo "========================================"
-          echo "Manifest Branch : ${{ inputs.MANIFEST_BRANCH }}"
-          echo "Device Tree     : ${{ inputs.DEVICE_TREE }}"
-          echo "Device Branch   : ${{ inputs.DEVICE_TREE_BRANCH }}"
-          echo "Device Path     : ${{ inputs.DEVICE_PATH }}"
-          echo "Device Name     : ${{ inputs.DEVICE_NAME }}"
-          echo "Build Target    : ${{ inputs.BUILD_TARGET }}image"
-          echo "========================================"
-
-      # ---------------------------------------------------------
-      # CLEANUP
-      # ---------------------------------------------------------
+          echo "Displaying variables/inputs."
+          echo "Manifest Branch: ${{ inputs.MANIFEST_BRANCH }}"
+          echo "Device Tree: ${{ inputs.DEVICE_TREE }}"
+          echo "Device Branch: ${{ inputs.DEVICE_TREE_BRANCH }}"
+          echo "Device Path: ${{ inputs.DEVICE_PATH }}"
+          echo "Device Name: ${{ inputs.DEVICE_NAME }}"
+          echo "Build Target: ${{ inputs.BUILD_TARGET }}image"
 
       - name: Cleanup
         uses: rokibhasansagar/slimhub_actions@main
-
-      # ---------------------------------------------------------
-      # SWAP
-      # ---------------------------------------------------------
 
       - name: Set Swap Space
         uses: pierotofy/set-swap-space@master
         with:
           swap-size-gb: 24
-
-      # ---------------------------------------------------------
-      # INSTALL DEPENDENCIES
-      # ---------------------------------------------------------
 
       - name: Prepare the environment
         run: |
@@ -154,19 +130,11 @@ jobs:
             python3 \
             tar
 
-      # ---------------------------------------------------------
-      # JAVA
-      # ---------------------------------------------------------
-
       - name: Install OpenJDK
         uses: actions/setup-java@v4
         with:
           distribution: 'zulu'
           java-version: '11'
-
-      # ---------------------------------------------------------
-      # REPO
-      # ---------------------------------------------------------
 
       - name: Install Git-Repo
         run: |
@@ -182,10 +150,6 @@ jobs:
 
           repo --version
 
-      # ---------------------------------------------------------
-      # MANIFEST
-      # ---------------------------------------------------------
-
       - name: Check Manifest Branch
         uses: haya14busa/action-cond@v1
         id: manifest
@@ -193,10 +157,6 @@ jobs:
           cond: ${{ inputs.MANIFEST_BRANCH == 'twrp-11' || inputs.MANIFEST_BRANCH == 'twrp-12.1' }}
           if_true: https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp.git
           if_false: https://github.com/minimal-manifest-twrp/platform_manifest_twrp_omni.git
-
-      # ---------------------------------------------------------
-      # REPO INIT
-      # ---------------------------------------------------------
 
       - name: Initialize Repo
         run: |
@@ -211,10 +171,6 @@ jobs:
             -u "${{ steps.manifest.outputs.value }}" \
             -b "${{ inputs.MANIFEST_BRANCH }}"
 
-      # ---------------------------------------------------------
-      # REPO SYNC
-      # ---------------------------------------------------------
-
       - name: Repo Sync
         run: |
           cd android-recovery
@@ -225,110 +181,124 @@ jobs:
             --no-clone-bundle \
             --no-tags
 
-      # ---------------------------------------------------------
-      # ALLOW SYSTEM_DLKM
-      # ---------------------------------------------------------
+      # ============================================================
+      # FIX system_dlkm
+      #
+      # The TWRP build validator currently accepts:
+      #
+      # system vendor product system_ext odm vendor_dlkm odm_dlkm
+      #
+      # Lake also uses system_dlkm.
+      #
+      # This step patches the validator in build/make/core/config.mk
+      # before lunch/dumpvars is executed.
+      # ============================================================
 
-      - name: Allow system_dlkm in TWRP
+      - name: Fix system_dlkm Validator
         run: |
           cd android-recovery
-
-          echo "========================================"
-          echo "Checking TWRP Xiaomi partition validation"
-          echo "========================================"
 
           CONFIG="build/make/core/config.mk"
 
           if [ ! -f "$CONFIG" ]; then
-            echo "ERROR: $CONFIG was not found."
+            echo "ERROR: $CONFIG not found!"
             exit 1
           fi
 
-          echo "Searching for Xiaomi dynamic partition validation..."
+          echo "=============================================="
+          echo "config.mk BEFORE system_dlkm patch"
+          echo "=============================================="
 
-          grep -n -A15 -B10 \
-            "BOARD_XIAOMI_DYNAMIC_PARTITIONS_PARTITION_LIST" \
-            "$CONFIG" || true
+          nl -ba "$CONFIG" | sed -n '895,915p'
 
           echo ""
-          echo "Patching system_dlkm support..."
+          echo "=============================================="
+          echo "Patching system_dlkm validator"
+          echo "=============================================="
 
-          python3 - "$CONFIG" <<'PY'
-          import sys
+          python3 <<'PY'
           from pathlib import Path
+          import re
 
-          config = Path(sys.argv[1])
-          text = config.read_text()
+          path = Path("build/make/core/config.mk")
+          text = path.read_text()
 
-          if "BOARD_XIAOMI_DYNAMIC_PARTITIONS_PARTITION_LIST" not in text:
-              print("WARNING: Xiaomi dynamic partition variable was not found.")
-              print("No patch was applied.")
-              sys.exit(0)
+          # Exact list shown in the build error:
+          #
+          # system vendor product system_ext odm vendor_dlkm odm_dlkm
+          #
+          # \s+ also handles Makefile line continuations/newlines.
 
-          if "system_dlkm" in text:
-              print("system_dlkm is already present in config.mk.")
-              sys.exit(0)
+          pattern = re.compile(
+              r"system\s+"
+              r"vendor\s+"
+              r"product\s+"
+              r"system_ext\s+"
+              r"odm\s+"
+              r"vendor_dlkm\s+"
+              r"odm_dlkm"
+          )
 
-          replacements = [
-              (
-                  "vendor_dlkm odm_dlkm",
-                  "vendor_dlkm odm_dlkm system_dlkm"
-              ),
-              (
-                  "vendor_dlkm, odm_dlkm",
-                  "vendor_dlkm, odm_dlkm, system_dlkm"
-              ),
-              (
-                  "\"vendor_dlkm\", \"odm_dlkm\"",
-                  "\"vendor_dlkm\", \"odm_dlkm\", \"system_dlkm\""
-              ),
-              (
-                  "'vendor_dlkm', 'odm_dlkm'",
-                  "'vendor_dlkm', 'odm_dlkm', 'system_dlkm'"
-              ),
-          ]
+          matches = list(pattern.finditer(text))
 
-          patched = False
+          print(f"Found {len(matches)} matching partition list(s).")
 
-          for old, new in replacements:
-              if old in text:
-                  text = text.replace(old, new, 1)
-                  patched = True
-                  print(f"Patched: {old} -> {new}")
-                  break
+          if not matches:
+              print("")
+              print("ERROR: Could not find the validator list.")
+              print("")
+              print("===== config.mk 895-915 =====")
 
-          if patched:
-              config.write_text(text)
-              print("system_dlkm support added successfully.")
-          else:
-              print("WARNING: Could not find the expected partition list format.")
-              print("The original config.mk was NOT modified.")
+              for number, line in enumerate(text.splitlines(), 1):
+                  if 895 <= number <= 915:
+                      print(f"{number}: {line}")
+
+              print("==============================")
+              raise SystemExit(1)
+
+          replacement = (
+              "system vendor product system_ext odm "
+              "vendor_dlkm odm_dlkm system_dlkm"
+          )
+
+          text, count = pattern.subn(replacement, text)
+
+          path.write_text(text)
+
+          print("")
+          print(f"Patched {count} occurrence(s).")
+          print("system_dlkm has been added to the valid partition list.")
           PY
 
           echo ""
-          echo "========================================"
-          echo "Final TWRP partition configuration"
-          echo "========================================"
+          echo "=============================================="
+          echo "config.mk AFTER system_dlkm patch"
+          echo "=============================================="
 
-          grep -n -A15 -B10 \
-            "BOARD_XIAOMI_DYNAMIC_PARTITIONS_PARTITION_LIST" \
-            "$CONFIG" || true
+          nl -ba "$CONFIG" | sed -n '895,915p'
 
-      # ---------------------------------------------------------
-      # CLONE DEVICE TREE
-      # ---------------------------------------------------------
+          echo ""
+          echo "Checking system_dlkm:"
+          grep -n "system_dlkm" "$CONFIG" || true
 
       - name: Clone Device Tree
         run: |
           cd android-recovery
 
-          if [ -z "${{ inputs.DEVICE_TREE }}" ] || \
-             [ "${{ inputs.DEVICE_TREE }}" = "YOUR_LAKE_DEVICE_TREE_URL" ]; then
-            echo "ERROR: Please enter your actual Lake device tree URL."
+          if [ -z "${{ inputs.DEVICE_TREE }}" ]; then
+            echo "ERROR: DEVICE_TREE is empty!"
+            echo "Enter your Lake device tree URL."
             exit 1
           fi
 
-          echo "Cloning device tree..."
+          echo "Cloning device tree:"
+          echo "${{ inputs.DEVICE_TREE }}"
+
+          echo "Branch:"
+          echo "${{ inputs.DEVICE_TREE_BRANCH }}"
+
+          echo "Path:"
+          echo "${{ inputs.DEVICE_PATH }}"
 
           git clone \
             "${{ inputs.DEVICE_TREE }}" \
@@ -337,61 +307,28 @@ jobs:
 
           cd "${{ inputs.DEVICE_PATH }}"
 
-          echo "Device tree commit:"
-          git rev-parse HEAD
-
           echo "COMMIT_ID=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
 
-      # ---------------------------------------------------------
-      # VERIFY DEVICE TREE
-      # ---------------------------------------------------------
-
-      - name: Verify Device Tree
-        run: |
-          cd android-recovery
-
-          echo "========================================"
-          echo "DEVICE TREE"
-          echo "========================================"
-
-          if [ ! -d "${{ inputs.DEVICE_PATH }}" ]; then
-            echo "ERROR: Device tree directory not found."
-            exit 1
-          fi
-
-          echo "Device path:"
-          echo "${{ inputs.DEVICE_PATH }}"
-
           echo ""
-          echo "Device tree files:"
-          find "${{ inputs.DEVICE_PATH }}" \
-            -maxdepth 2 \
-            -type f | sort | head -100
-
-          echo ""
-          echo "system_dlkm references:"
-          grep -R "system_dlkm" \
-            "${{ inputs.DEVICE_PATH }}" \
-            -n || true
-
-      # ---------------------------------------------------------
-      # CHECK MAKEFILE
-      # ---------------------------------------------------------
+          echo "Device tree commit:"
+          git rev-parse HEAD
 
       - name: Check Build Makefile
         run: |
           cd android-recovery
 
+          echo "Checking recovery makefile..."
+
           if [ -f "${{ inputs.DEVICE_PATH }}/twrp_${{ inputs.DEVICE_NAME }}.mk" ]; then
 
-            echo "Found TWRP makefile:"
+            echo "Found:"
             echo "${{ inputs.DEVICE_PATH }}/twrp_${{ inputs.DEVICE_NAME }}.mk"
 
             echo "DEVICE_MAKEFILE=twrp_${{ inputs.DEVICE_NAME }}" >> "$GITHUB_ENV"
 
           elif [ -f "${{ inputs.DEVICE_PATH }}/omni_${{ inputs.DEVICE_NAME }}.mk" ]; then
 
-            echo "Found Omni makefile:"
+            echo "Found:"
             echo "${{ inputs.DEVICE_PATH }}/omni_${{ inputs.DEVICE_NAME }}.mk"
 
             echo "DEVICE_MAKEFILE=omni_${{ inputs.DEVICE_NAME }}" >> "$GITHUB_ENV"
@@ -401,66 +338,108 @@ jobs:
             echo "ERROR: No recovery makefile found!"
 
             echo ""
-            echo "Available makefiles:"
-            find "${{ inputs.DEVICE_PATH }}" \
-              -maxdepth 2 \
-              -type f \
-              \( -name "twrp_*.mk" -o -name "omni_*.mk" \) \
-              -print
+            echo "Files in device tree:"
+            find "${{ inputs.DEVICE_PATH }}" -maxdepth 2 -type f | sort
 
             exit 1
-
           fi
 
-      # ---------------------------------------------------------
-      # BUILD
-      # ---------------------------------------------------------
+          echo ""
+          echo "Using makefile:"
+          echo "$DEVICE_MAKEFILE"
+
+      - name: Check Device Tree Configuration
+        run: |
+          cd android-recovery
+
+          echo "=============================================="
+          echo "Device Configuration"
+          echo "=============================================="
+
+          echo "Device: ${{ inputs.DEVICE_NAME }}"
+          echo "Path: ${{ inputs.DEVICE_PATH }}"
+          echo "Target: ${{ inputs.BUILD_TARGET }}"
+          echo "Manifest: ${{ inputs.MANIFEST_BRANCH }}"
+          echo "Makefile: ${{ env.DEVICE_MAKEFILE }}"
+
+          echo ""
+          echo "Checking system_dlkm references..."
+
+          grep -Rni \
+            --exclude-dir=.git \
+            "system_dlkm" \
+            "${{ inputs.DEVICE_PATH }}" \
+            2>/dev/null || true
 
       - name: Building Image
         run: |
           cd android-recovery
 
-          echo "========================================"
-          echo "Starting TWRP build"
-          echo "========================================"
-
-          source build/envsetup.sh
+          echo "=============================================="
+          echo "Starting TWRP Build"
+          echo "=============================================="
 
           export ALLOW_MISSING_DEPENDENCIES=true
 
-          echo "Device makefile:"
-          echo "${{ env.DEVICE_MAKEFILE }}"
+          source build/envsetup.sh
+
+          echo ""
+          echo "Using lunch target:"
+          echo "${{ env.DEVICE_MAKEFILE }}-eng"
 
           lunch "${{ env.DEVICE_MAKEFILE }}-eng"
 
+          echo ""
+          echo "Cleaning previous build..."
           make clean
 
-          make \
-            "${{ inputs.BUILD_TARGET }}image" \
+          echo ""
+          echo "Building:"
+          echo "${{ inputs.BUILD_TARGET }}image"
+
+          make "${{ inputs.BUILD_TARGET }}image" \
             -j$(nproc --all)
 
           echo ""
-          echo "========================================"
-          echo "BUILD COMPLETE"
-          echo "========================================"
+          echo "=============================================="
+          echo "BUILD COMPLETED"
+          echo "=============================================="
 
           echo "Output:"
-          ls -lah \
-            "out/target/product/${{ inputs.DEVICE_NAME }}/" \
-            || true
+          echo "out/target/product/${{ inputs.DEVICE_NAME }}/${{ inputs.BUILD_TARGET }}.img"
 
-      # ---------------------------------------------------------
-      # BUILD PROPERTIES
-      # ---------------------------------------------------------
+      - name: Verify Build Output
+        run: |
+          cd android-recovery
+
+          OUTPUT_DIR="out/target/product/${{ inputs.DEVICE_NAME }}"
+
+          echo "Checking build output:"
+          echo "$OUTPUT_DIR"
+
+          if [ "${{ inputs.BUILD_TARGET }}" = "vendorboot" ]; then
+            IMAGE="$OUTPUT_DIR/vendor_boot.img"
+          else
+            IMAGE="$OUTPUT_DIR/${{ inputs.BUILD_TARGET }}.img"
+          fi
+
+          if [ ! -f "$IMAGE" ]; then
+            echo ""
+            echo "ERROR: Build image was not created!"
+            echo ""
+            echo "Output directory:"
+            ls -lah "$OUTPUT_DIR" || true
+            exit 1
+          fi
+
+          echo ""
+          echo "BUILD IMAGE FOUND:"
+          ls -lh "$IMAGE"
 
       - name: Set Other Build Properties
         run: |
           echo "BUILD_DATE=$(date +%Y%m%d)" >> "$GITHUB_ENV"
           echo "VENDOR=$(echo "${{ inputs.DEVICE_PATH }}" | cut -d'/' -f2)" >> "$GITHUB_ENV"
-
-      # ---------------------------------------------------------
-      # SAMSUNG TAR
-      # ---------------------------------------------------------
 
       - name: Compressing TWRP Build (if Samsung)
         if: env.VENDOR == 'samsung'
@@ -486,13 +465,9 @@ jobs:
 
           else
 
-            echo "Unknown build target. Skipping tar."
+            echo "Unknown build target. Skipping tar..."
 
           fi
-
-      # ---------------------------------------------------------
-      # RELEASE - BOOT / RECOVERY
-      # ---------------------------------------------------------
 
       - name: Upload to Release (boot and recovery)
         if: inputs.BUILD_TARGET == 'boot' || inputs.BUILD_TARGET == 'recovery'
@@ -504,17 +479,17 @@ jobs:
           tag_name: ${{ github.run_id }}
           body: |
             Build: ${{ inputs.MANIFEST_BRANCH }}
-            Device: ${{ inputs.DEVICE_NAME }}
-            Device Path: ${{ inputs.DEVICE_PATH }}
-            Device Tree: ${{ inputs.DEVICE_TREE }}
-            Device Branch: ${{ inputs.DEVICE_TREE_BRANCH }}
-            Commit: ${{ env.COMMIT_ID }}
 
-      # ---------------------------------------------------------
-      # RELEASE - VENDOR BOOT
-      # ---------------------------------------------------------
+            Device Tree:
+            ${{ inputs.DEVICE_TREE }}
 
-      - name: Upload to Release (if vendor_boot)
+            Branch:
+            ${{ inputs.DEVICE_TREE_BRANCH }}
+
+            Commit:
+            ${{ env.COMMIT_ID }}
+
+      - name: Upload to Release (vendor_boot)
         if: inputs.BUILD_TARGET == 'vendorboot'
         uses: softprops/action-gh-release@v2
         with:
@@ -524,41 +499,46 @@ jobs:
           tag_name: ${{ github.run_id }}
           body: |
             Build: ${{ inputs.MANIFEST_BRANCH }}
-            Device: ${{ inputs.DEVICE_NAME }}
-            Device Path: ${{ inputs.DEVICE_PATH }}
-            Device Tree: ${{ inputs.DEVICE_TREE }}
-            Device Branch: ${{ inputs.DEVICE_TREE_BRANCH }}
-            Commit: ${{ env.COMMIT_ID }}
 
-      # ---------------------------------------------------------
-      # LDCHECK
-      # ---------------------------------------------------------
+            Device Tree:
+            ${{ inputs.DEVICE_TREE }}
+
+            Branch: ${{ inputs.DEVICE_TREE_BRANCH }}
+
+            Commit:
+            ${{ env.COMMIT_ID }}
 
       - name: Run LDCheck
         run: |
           RECOVERY_ROOT="${GITHUB_WORKSPACE}/android-recovery/out/target/product/${{ inputs.DEVICE_NAME }}/recovery/root"
 
           echo "Creating recovery root directory..."
-
           mkdir -p "$RECOVERY_ROOT"
 
-          if [ ! -f "tools/libneeds" ]; then
-            echo "WARNING: tools/libneeds not found."
-          else
-            mv -n tools/libneeds "$RECOVERY_ROOT/" || true
+          if [ ! -d "tools" ]; then
+            echo "ERROR: tools directory not found!"
+            exit 1
           fi
 
-          if [ ! -f "tools/ldcheck" ]; then
-            echo "WARNING: tools/ldcheck not found."
-            exit 0
+          cd tools
+
+          if [ -f "libneeds" ]; then
+            mv -n libneeds "$RECOVERY_ROOT/" || true
           fi
 
-          mv -n tools/ldcheck "$RECOVERY_ROOT/" || true
+          if [ -f "ldcheck" ]; then
+            mv -n ldcheck "$RECOVERY_ROOT/" || true
+          fi
 
           cd "$RECOVERY_ROOT"
 
           if [ ! -f "ldcheck" ]; then
-            echo "WARNING: ldcheck was not installed."
+            echo "ldcheck not available. Skipping LDCheck."
+            exit 0
+          fi
+
+          if [ ! -f "libneeds" ]; then
+            echo "libneeds not available. Skipping LDCheck."
             exit 0
           fi
 
@@ -566,6 +546,6 @@ jobs:
             -p system/lib64:vendor/lib64:system/lib:vendor/lib \
             -d "${{ inputs.LDCHECK }}"
 
-          echo "Done checking missing dependencies."
+          echo "Done checking missing dependencies. Review, and reconfigure your tree."
 
         continue-on-error: true
