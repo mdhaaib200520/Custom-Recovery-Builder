@@ -1,4 +1,3 @@
-
 name: Recovery Build
 
 on:
@@ -61,250 +60,345 @@ jobs:
       contents: write
 
     steps:
-      - name: Display Run Parameters
-        run: |
-          echo "::group::User Environment Variables"
-          echo "Manifest URL: ${{ github.event.inputs.MANIFEST_URL }}"
-          echo "Manifest Branch: ${{ github.event.inputs.MANIFEST_BRANCH }}"
-          echo "Device Tree URL: ${{ github.event.inputs.DEVICE_TREE_URL }}"
-          echo "Device Tree Branch: ${{ github.event.inputs.DEVICE_TREE_BRANCH }}"
-          echo "Device Path: ${{ github.event.inputs.DEVICE_PATH }}"
-          echo "Device Name: ${{ github.event.inputs.DEVICE_NAME }}"
-          echo "Makefile Name: ${{ github.event.inputs.MAKEFILE_NAME }}"
-          echo "Build Target: ${{ github.event.inputs.BUILD_TARGET }}.img"
-          echo "::endgroup::"
 
-      - name: Check Out
-        uses: actions/checkout@v4
+    - name: Display Run Parameters
+      run: |
+        echo "::group::User Environment Variables"
+        echo "Manifest URL: ${{ github.event.inputs.MANIFEST_URL }}"
+        echo "Manifest Branch: ${{ github.event.inputs.MANIFEST_BRANCH }}"
+        echo "Device Tree URL: ${{ github.event.inputs.DEVICE_TREE_URL }}"
+        echo "Device Tree Branch: ${{ github.event.inputs.DEVICE_TREE_BRANCH }}"
+        echo "Device Path: ${{ github.event.inputs.DEVICE_PATH }}"
+        echo "Device Name: ${{ github.event.inputs.DEVICE_NAME }}"
+        echo "Makefile Name: ${{ github.event.inputs.MAKEFILE_NAME }}"
+        echo "Build Target: ${{ github.event.inputs.BUILD_TARGET }}.img"
+        echo "::endgroup::"
 
-      - name: Cleanup
-        uses: rokibhasansagar/slimhub_actions@main
+    - name: Check Out
+      uses: actions/checkout@v4
 
-      - name: Prepare the environment
-        run: |
-          sudo apt update && sudo apt upgrade -y
+    - name: Cleanup
+      uses: rokibhasansagar/slimhub_actions@main
 
-          DEBIAN_FRONTEND=noninteractive sudo apt install -yq \
-            linux-modules-extra-$(uname -r) \
-            gperf gcc-multilib gcc-10-multilib g++-multilib g++-10-multilib \
-            libc6-dev lib32ncurses-dev x11proto-core-dev libx11-dev tree lib32z-dev libgl1-mesa-dev libxml2-utils \
-            xsltproc bc ccache lib32readline-dev lib32z1-dev liblz4-tool libncurses-dev libsdl1.2-dev \
-            build-essential libgtk-3-dev libglu1-mesa-dev freeglut3-dev git libxml2 lzop pngcrush schedtool squashfs-tools \
-            imagemagick libbz2-dev lzma ncftp qemu-user-static libstdc++-10-dev libncurses6 python3 tar
+    - name: Prepare the environment
+      run: |
+        sudo apt update && sudo apt upgrade -y
 
-      - name: Install OpenJDK
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'zulu'
-          java-version: '11'
+        DEBIAN_FRONTEND=noninteractive sudo apt install -yq \
+          linux-modules-extra-$(uname -r) \
+          gperf gcc-multilib gcc-10-multilib g++-multilib g++-10-multilib \
+          libc6-dev lib32ncurses-dev x11proto-core-dev libx11-dev tree lib32z-dev \
+          libgl1-mesa-dev libxml2-utils xsltproc bc ccache lib32readline-dev \
+          lib32z1-dev liblz4-tool libncurses-dev libsdl1.2-dev build-essential \
+          libgtk-3-dev libglu1-mesa-dev freeglut3-dev git libxml2 lzop pngcrush \
+          schedtool squashfs-tools imagemagick libbz2-dev lzma ncftp \
+          qemu-user-static libstdc++-10-dev libncurses6 python3 tar
 
-      - name: Setup SSH Keys
-        if: ${{ startsWith(github.event.inputs.MANIFEST_URL, 'git@github.com') ||
+    - name: Install OpenJDK
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'zulu'
+        java-version: '11'
+
+    - name: Setup SSH Keys
+      if: ${{ startsWith(github.event.inputs.MANIFEST_URL, 'git@github.com') ||
           startsWith(github.event.inputs.DEVICE_TREE_URL, 'git@github.com') ||
           startsWith(github.event.inputs.COMMON_TREE_URL, 'git@github.com') }}
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+      uses: webfactory/ssh-agent@v0.9.0
+      with:
+        ssh-private-key: |
+          ${{ secrets.SSH_PRIVATE_KEY }}
 
-      - name: Install repo
-        run: |
-          mkdir -p ~/bin
-          curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo -o ~/bin/repo
-          chmod a+x ~/bin/repo
-          sudo ln -sf ~/bin/repo /usr/bin/repo
+    - name: Install repo
+      run: |
+        mkdir -p ~/bin
+        curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo \
+          -o ~/bin/repo
+        chmod a+x ~/bin/repo
+        sudo ln -sf ~/bin/repo /usr/bin/repo
 
-      - name: Initialize repo
-        id: pwd
-        run: |
-          mkdir -p workspace
-          cd workspace
-          echo "workspace-folder=$(pwd)" >> "$GITHUB_OUTPUT"
+    - name: Initialize repo
+      id: pwd
+      run: |
+        mkdir -p workspace
+        cd workspace
 
-          git config --global user.name "Nico170420"
-          git config --global user.email "b170420nc@gmail.com"
+        echo "workspace-folder=$(pwd)" >> "$GITHUB_OUTPUT"
 
-          repo init \
-            --depth=1 \
-            -u "${{ github.event.inputs.MANIFEST_URL }}" \
-            -b "${{ github.event.inputs.MANIFEST_BRANCH }}"
+        git config --global user.name "Nico170420"
+        git config --global user.email "b170420nc@gmail.com"
 
-      - name: Repo Sync
-        run: |
-          repo sync -j"$(nproc --all)" --force-sync
-        working-directory: ${{ steps.pwd.outputs.workspace-folder }}
+        repo init \
+          --depth=1 \
+          -u "${{ github.event.inputs.MANIFEST_URL }}" \
+          -b "${{ github.event.inputs.MANIFEST_BRANCH }}"
 
-      # ============================================================
-      # FIX SYSTEM_DLKM
-      #
-      # Locate valid_super_partition_list by its variable name.
-      # Do not depend on fixed line numbers or a hard-coded list
-      # matching the entire expected partition sequence.
-      # ============================================================
+    - name: Repo Sync
+      run: |
+        repo sync -j"$(nproc --all)" --force-sync
+      working-directory: ${{ steps.pwd.outputs.workspace-folder }}
 
-      - name: Fix system_dlkm validator
-        run: |
-          set -eu
+    # ============================================================
+    # FIX SYSTEM_DLKM
+    #
+    # The previous version searched for this exact text:
+    #
+    # system vendor product system_ext odm vendor_dlkm odm_dlkm
+    #
+    # That assumption is incorrect for some TWRP/Android revisions.
+    #
+    # This version searches for the actual
+    # valid_super_partition_list variable instead.
+    # ============================================================
 
-          CONFIG="build/make/core/config.mk"
+    - name: Fix system_dlkm validator
+      run: |
+        set -eu
 
-          echo "Checking $CONFIG"
+        CONFIG="build/make/core/config.mk"
 
-          if [ ! -f "$CONFIG" ]; then
-            echo "ERROR: $CONFIG not found!"
-            exit 1
-          fi
+        echo "Checking $CONFIG"
 
-          echo "Searching for valid_super_partition_list..."
+        if [ ! -f "$CONFIG" ]; then
+          echo "ERROR: $CONFIG not found!"
+          exit 1
+        fi
 
-          grep -n -C 3 'valid_super_partition_list' "$CONFIG" || true
+        echo ""
+        echo "=========================================="
+        echo "Searching partition validators"
+        echo "=========================================="
 
-          python3 <<'PY'
-          from pathlib import Path
-          import re
-          import sys
+        grep -n -E \
+          "valid_super_partition_list|SUPER_PARTITION|PARTITION_LIST|system_dlkm|vendor_dlkm|odm_dlkm" \
+          "$CONFIG" || true
 
-          path = Path("build/make/core/config.mk")
-          text = path.read_text()
+        echo ""
+        echo "=========================================="
+        echo "Searching valid_super_partition_list"
+        echo "=========================================="
 
-          # Find the variable itself, not a hard-coded partition sequence.
-          pattern = re.compile(
-              r"(?m)^([ \t]*valid_super_partition_list[ \t]*:=[ \t]*)([^\n]*)$"
-          )
+        grep -n -C 5 "valid_super_partition_list" "$CONFIG" || true
 
-          matches = list(pattern.finditer(text))
+        python3 <<'PY'
+        from pathlib import Path
+        import re
+        import sys
 
-          if not matches:
-              print(
-                  "ERROR: valid_super_partition_list assignment "
-                  "was not found in config.mk."
-              )
-              print(
-                  "This source revision may define the list elsewhere "
-                  "or use a different format."
-              )
-              sys.exit(1)
+        path = Path("build/make/core/config.mk")
+        text = path.read_text()
 
-          # Patch every direct assignment so duplicate definitions
-          # do not leave an unpatched validator in the same file.
-          def patch(match):
-              value = match.group(2)
-              partitions = value.split()
+        # Match:
+        #
+        # valid_super_partition_list := ...
+        #
+        # while allowing indentation and spacing differences.
 
-              if "system_dlkm" in partitions:
-                  print("system_dlkm already present; skipping this assignment.")
-                  return match.group(0)
+        pattern = re.compile(
+            r"(?m)^"
+            r"([ \t]*valid_super_partition_list[ \t]*:=[ \t]*)"
+            r"([^\n]*)"
+            r"$"
+        )
 
-              updated = value.rstrip() + " system_dlkm"
-              print("Adding system_dlkm to valid_super_partition_list.")
-              return match.group(1) + updated
+        matches = list(pattern.finditer(text))
 
-          updated_text = pattern.sub(patch, text)
+        if not matches:
+            print("")
+            print("ERROR: valid_super_partition_list was not found.")
+            print("")
+            print("This source revision may use a different")
+            print("partition-validator implementation.")
+            print("")
+            print("Relevant definitions found in config.mk:")
 
-          if updated_text == text:
-              print("No changes were needed.")
-          else:
-              path.write_text(updated_text)
-              print("Successfully patched config.mk.")
+            keywords = (
+                "valid_super",
+                "SUPER_PARTITION",
+                "PARTITION_LIST",
+                "system_dlkm",
+                "vendor_dlkm",
+                "odm_dlkm",
+            )
 
-          # Verify the result.
-          verified = path.read_text()
-          assignments = list(pattern.finditer(verified))
+            for number, line in enumerate(text.splitlines(), 1):
+                if any(keyword in line for keyword in keywords):
+                    print(f"{number}: {line}")
 
-          if not assignments:
-              print("ERROR: Could not verify the partition-list assignment.")
-              sys.exit(1)
+            sys.exit(1)
 
-          missing = [
-              match.group(2).split()
-              for match in assignments
-              if "system_dlkm" not in match.group(2).split()
-          ]
+        changed = False
 
-          if missing:
-              print(
-                  "ERROR: At least one direct assignment still lacks "
-                  "system_dlkm."
-              )
-              sys.exit(1)
+        def patch(match):
+            global changed
 
-          print("Verification passed for direct assignments.")
-          PY
+            prefix = match.group(1)
+            value = match.group(2)
 
-          echo ""
-          echo "Updated partition-list definition:"
-          grep -n -C 3 'valid_super_partition_list' "$CONFIG"
+            partitions = value.split()
 
-      - name: Clone device tree
-        run: |
-          git clone \
-            "${{ github.event.inputs.DEVICE_TREE_URL }}" \
-            -b "${{ github.event.inputs.DEVICE_TREE_BRANCH }}" \
-            "./${{ github.event.inputs.DEVICE_PATH }}"
-        working-directory: ${{ steps.pwd.outputs.workspace-folder }}
+            if "system_dlkm" in partitions:
+                print(
+                    "system_dlkm already exists in "
+                    "valid_super_partition_list."
+                )
+                return match.group(0)
 
-      - name: Clone common tree
-        if: |
-          github.event.inputs.COMMON_TREE_URL != null &&
-          github.event.inputs.COMMON_PATH != null &&
-          github.event.inputs.COMMON_TREE_URL != '' &&
-          github.event.inputs.COMMON_PATH != ''
-        run: |
-          git clone \
-            "${{ github.event.inputs.COMMON_TREE_URL }}" \
-            -b "${{ github.event.inputs.DEVICE_TREE_BRANCH }}" \
-            "./${{ github.event.inputs.COMMON_PATH }}"
-        working-directory: ${{ steps.pwd.outputs.workspace-folder }}
+            print(
+                "Adding system_dlkm to "
+                "valid_super_partition_list."
+            )
 
-      - name: Check Build Tree
-        uses: haya14busa/action-cond@v1
-        id: buildtree
-        with:
-          cond: ${{ github.event.inputs.MANIFEST_BRANCH == 'twrp-11' || github.event.inputs.MANIFEST_BRANCH == 'twrp-12.1' }}
-          if_true: twrp
-          if_false: omni
+            changed = True
 
-      - name: Sync Device Dependencies
-        run: |
-          bash "${GITHUB_WORKSPACE}/scripts/convert.sh" \
-            "${{ github.event.inputs.DEVICE_PATH }}/${{ steps.buildtree.outputs.value }}.dependencies"
+            return (
+                prefix
+                + value.rstrip()
+                + " system_dlkm"
+            )
 
-          repo sync -j"$(nproc --all)"
-        working-directory: ${{ steps.pwd.outputs.workspace-folder }}
-        continue-on-error: true
+        updated_text = pattern.sub(patch, text)
 
-      - name: Set Swap Space
-        uses: pierotofy/set-swap-space@master
-        with:
-          swap-size-gb: 12
+        if changed:
+            path.write_text(updated_text)
+            print("")
+            print("config.mk successfully patched.")
+        else:
+            print("")
+            print("No changes required.")
 
-      - name: Building recovery
-        run: |
-          set -e
+        # --------------------------------------------------------
+        # Verification
+        # --------------------------------------------------------
 
-          source build/envsetup.sh
+        verified_text = path.read_text()
 
-          export ALLOW_MISSING_DEPENDENCIES=true
+        final_matches = list(
+            pattern.finditer(verified_text)
+        )
 
-          lunch "${{ github.event.inputs.MAKEFILE_NAME }}-eng"
+        if not final_matches:
+            print(
+                "ERROR: Could not verify "
+                "valid_super_partition_list."
+            )
+            sys.exit(1)
 
-          make clean
+        for match in final_matches:
+            partitions = match.group(2).split()
 
-          make "${{ github.event.inputs.BUILD_TARGET }}image" \
-            -j"$(nproc --all)"
-        working-directory: ${{ steps.pwd.outputs.workspace-folder }}
+            if "system_dlkm" not in partitions:
+                print(
+                    "ERROR: system_dlkm is still missing "
+                    "from valid_super_partition_list."
+                )
+                sys.exit(1)
 
-      - name: Upload to Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            workspace/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/${{ github.event.inputs.BUILD_TARGET }}.img
-            workspace/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/*.zip
-            workspace/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/*vendor*.img
-          name: ${{ github.event.inputs.DEVICE_NAME }}-${{ github.run_id }}
-          tag_name: ${{ github.run_id }}
-          body: |
-            Manifest: ${{ github.event.inputs.MANIFEST_BRANCH }}
-            Device: ${{ github.event.inputs.DEVICE_NAME }}
-            Build target: ${{ github.event.inputs.BUILD_TARGET }}.img
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        print("")
+        print("==========================================")
+        print("system_dlkm validator patch successful")
+        print("==========================================")
+
+        for match in final_matches:
+            print(
+                "valid_super_partition_list = "
+                + match.group(2)
+            )
+        PY
+
+        echo ""
+        echo "=========================================="
+        echo "Final partition validator"
+        echo "=========================================="
+
+        grep -n -C 5 \
+          "valid_super_partition_list" \
+          "$CONFIG"
+
+        echo ""
+        echo "=========================================="
+        echo "system_dlkm references"
+        echo "=========================================="
+
+        grep -n "system_dlkm" "$CONFIG" || true
+
+      working-directory: ${{ steps.pwd.outputs.workspace-folder }}
+
+    - name: Clone device tree
+      run: |
+        git clone \
+          "${{ github.event.inputs.DEVICE_TREE_URL }}" \
+          -b "${{ github.event.inputs.DEVICE_TREE_BRANCH }}" \
+          "./${{ github.event.inputs.DEVICE_PATH }}"
+      working-directory: ${{ steps.pwd.outputs.workspace-folder }}
+
+    - name: Clone common tree
+      if: |
+        github.event.inputs.COMMON_TREE_URL != null &&
+        github.event.inputs.COMMON_PATH != null &&
+        github.event.inputs.COMMON_TREE_URL != '' &&
+        github.event.inputs.COMMON_PATH != ''
+      run: |
+        git clone \
+          "${{ github.event.inputs.COMMON_TREE_URL }}" \
+          -b "${{ github.event.inputs.DEVICE_TREE_BRANCH }}" \
+          "./${{ github.event.inputs.COMMON_PATH }}"
+      working-directory: ${{ steps.pwd.outputs.workspace-folder }}
+
+    - name: Check Build Tree
+      uses: haya14busa/action-cond@v1
+      id: buildtree
+      with:
+        cond: ${{ github.event.inputs.MANIFEST_BRANCH == 'twrp-11' || github.event.inputs.MANIFEST_BRANCH == 'twrp-12.1' }}
+        if_true: twrp
+        if_false: omni
+
+    - name: Sync Device Dependencies
+      run: |
+        bash "${GITHUB_WORKSPACE}/scripts/convert.sh" \
+          "${{ github.event.inputs.DEVICE_PATH }}/${{ steps.buildtree.outputs.value }}.dependencies"
+
+        repo sync -j"$(nproc --all)"
+      working-directory: ${{ steps.pwd.outputs.workspace-folder }}
+      continue-on-error: true
+
+    - name: Set Swap Space
+      uses: pierotofy/set-swap-space@master
+      with:
+        swap-size-gb: 12
+
+    - name: Building recovery
+      run: |
+        set -e
+
+        source build/envsetup.sh
+
+        export ALLOW_MISSING_DEPENDENCIES=true
+
+        lunch "${{ github.event.inputs.MAKEFILE_NAME }}-eng"
+
+        make clean
+
+        make "${{ github.event.inputs.BUILD_TARGET }}image" \
+          -j"$(nproc --all)"
+      working-directory: ${{ steps.pwd.outputs.workspace-folder }}
+
+    - name: Upload to Release
+      uses: softprops/action-gh-release@v2
+      with:
+        files: |
+          workspace/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/${{ github.event.inputs.BUILD_TARGET }}.img
+          workspace/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/*.zip
+          workspace/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/*vendor*.img
+
+        name: ${{ github.event.inputs.DEVICE_NAME }}-${{ github.run_id }}
+
+        tag_name: ${{ github.run_id }}
+
+        body: |
+          Manifest: ${{ github.event.inputs.MANIFEST_BRANCH }}
+          Device: ${{ github.event.inputs.DEVICE_NAME }}
+          Target: ${{ github.event.inputs.BUILD_TARGET }}.img
+
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
